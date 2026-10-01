@@ -22,6 +22,7 @@ function SimulatorWidget(node) {
   function initialize() {
     stripText();
     ui.initialize();
+    ui.refreshSourceLines();
     display.initialize();
     simulator.reset();
 
@@ -52,6 +53,19 @@ function SimulatorWidget(node) {
     $node.find('.notesButton').click(ui.showNotes);
     $node.find('.code').keypress(simulator.stop);
     $node.find('.code').keypress(ui.initialize);
+    $node.find('.code').on('input', function () {
+      simulator.stop();
+      ui.initialize();
+      ui.refreshSourceLines();
+      ui.clearSourceLine();
+    });
+    $node.find('.code').on('scroll', function () {
+      ui.syncSourceScroll(this.scrollTop);
+    });
+    $node.find('.execution-speed').on('input change', function () {
+      ui.updateExecutionSpeed(this.value);
+      simulator.setExecutionSpeed(this.value);
+    });
     $(document).keypress(memory.storeKeypress);
   }
 
@@ -125,6 +139,41 @@ function SimulatorWidget(node) {
       setState(start);
     }
 
+    function refreshSourceLines() {
+      var lines = ($node.find('.code').val() || '').split('\n');
+      var html = '';
+
+      for (var i = 0; i < lines.length; i++) {
+        html += '<div class="source-line">' + (i + 1) + '</div>';
+      }
+      $node.find('.source-gutter').html(html);
+    }
+
+    function clearSourceLine() {
+      $node.find('.source-line').removeClass('active');
+    }
+
+    function highlightSourceLine(line) {
+      var $lines = $node.find('.source-line');
+      clearSourceLine();
+      if (typeof line !== 'number' || line < 0 || line >= $lines.length) {
+        return;
+      }
+
+      var code = $node.find('.code')[0];
+      code.scrollTop = Math.max(0, (line * 16) - Math.floor(code.clientHeight / 2) + 8);
+      syncSourceScroll(code.scrollTop);
+      $lines.eq(line).addClass('active');
+    }
+
+    function syncSourceScroll(scrollTop) {
+      $node.find('.source-gutter').scrollTop(scrollTop);
+    }
+
+    function updateExecutionSpeed(speed) {
+      $node.find('.execution-speed-value').text(speed + '%');
+    }
+
     function play() {
       setState(running);
     }
@@ -155,6 +204,11 @@ function SimulatorWidget(node) {
 
     return {
       initialize: initialize,
+      refreshSourceLines: refreshSourceLines,
+      clearSourceLine: clearSourceLine,
+      highlightSourceLine: highlightSourceLine,
+      syncSourceScroll: syncSourceScroll,
+      updateExecutionSpeed: updateExecutionSpeed,
       play: play,
       stop: stop,
       assembleSuccess: assembleSuccess,
@@ -278,6 +332,14 @@ function SimulatorWidget(node) {
     var debug = false;
     var monitoring = false;
     var executeId;
+    var instructionsPerTick = 97;
+
+    function setExecutionSpeed(speed) {
+      speed = parseInt(speed, 10);
+      if (!isNaN(speed)) {
+        instructionsPerTick = Math.max(1, Math.round(97 * speed / 100));
+      }
+    }
 
     //set zero and negative processor flags based on result
     function setNVflags(value) {
@@ -1510,7 +1572,7 @@ function SimulatorWidget(node) {
       if (!debug) {
         // use a prime number of iterations to avoid aliasing effects
 
-        for (var w = 0; w < 97; w++) {
+        for (var w = 0; w < instructionsPerTick; w++) {
           execute();
         }
       }
@@ -1536,6 +1598,10 @@ function SimulatorWidget(node) {
     //             This is the main part of the CPU simulator.
     function execute(debugging) {
       if (!codeRunning && !debugging) { return; }
+
+      if (debugging || debug) {
+        ui.highlightSourceLine(assembler.getSourceLineForAddress(regPC));
+      }
 
       setRandomByte();
       executeNextInstruction();
@@ -1600,6 +1666,7 @@ function SimulatorWidget(node) {
         message("Unable to find/parse given address/label");
       } else {
         regPC = addr;
+        ui.highlightSourceLine(assembler.getSourceLineForAddress(regPC));
       }
       updateDebugInfo();
     }
@@ -1619,6 +1686,7 @@ function SimulatorWidget(node) {
     // reset() - Reset CPU and memory.
     function reset() {
       display.reset();
+      ui.clearSourceLine();
       for (var i = 0; i < 0x600; i++) { // clear ZP, stack and screen
         memory.set(i, 0x00);
       }
@@ -1640,6 +1708,7 @@ function SimulatorWidget(node) {
 
     return {
       runBinary: runBinary,
+      setExecutionSpeed: setExecutionSpeed,
       enableDebugger: enableDebugger,
       stopDebugger: stopDebugger,
       debugExec: debugExec,
@@ -1758,6 +1827,9 @@ function SimulatorWidget(node) {
     var defaultCodePC;
     var codeLen;
     var codeAssembledOK = false;
+    var currentSourceLine;
+    var sourceLineByAddress = {};
+    var definitions = {};
 
     var Opcodes = [
       /* Name, Imm,  ZP,   ZPX,  ZPY,  ABS, ABSX, ABSY,  IND, INDX, INDY, SNGL, BRA */
@@ -1825,6 +1897,9 @@ function SimulatorWidget(node) {
     function assembleCode() {
       simulator.reset();
       labels.reset();
+      sourceLineByAddress = {};
+      currentSourceLine = undefined;
+      ui.refreshSourceLines();
       defaultCodePC = 0x600;
       $node.find('.messages code').empty();
 
@@ -1836,6 +1911,11 @@ function SimulatorWidget(node) {
       message("Indexing labels..");
 
       defaultCodePC = 0x600;
+
+      if (!indexDefines(lines)) {
+        ui.initialize();
+        return false;
+      }
 
       if (!labels.indexLines(lines)) {
         return false;
@@ -1872,12 +1952,76 @@ function SimulatorWidget(node) {
       message("Code assembled successfully, " + codeLen + " bytes.");
     }
 
+    function indexDefines(lines) {
+      definitions = {};
+
+      for (var i = 0; i < lines.length; i++) {
+        var input = lines[i].replace(/^(.*?);.*/, "$1");
+        input = input.replace(/^\s+/, "").replace(/\s+$/, "");
+
+        if (!/^DEFINE(?:\s|$)/i.test(input)) {
+          continue;
+        }
+
+        var match = input.match(/^DEFINE\s+([A-Za-z_]\w*)\s+(\$[0-9a-f]{1,4}|%[01]{1,16}|[0-9]{1,5})$/i);
+        if (!match) {
+          var invalidLine = lines[i].replace(/</g, "&lt;").replace(/>/g, "&gt;");
+          message("**Invalid DEFINE on line " + (i + 1) + ":** " + invalidLine);
+          return false;
+        }
+
+        var name = match[1].toUpperCase();
+        if (name === "A" || name === "X" || name === "Y") {
+          message("**DEFINE cannot use register name " + name + " on line " + (i + 1) + ".**");
+          return false;
+        }
+        if (Object.prototype.hasOwnProperty.call(definitions, name)) {
+          message("**Duplicate DEFINE on line " + (i + 1) + ":** " + name);
+          return false;
+        }
+
+        var literal = match[2];
+        var value;
+        if (literal.charAt(0) === "$") {
+          value = parseInt(literal.substring(1), 16);
+        } else if (literal.charAt(0) === "%") {
+          value = parseInt(literal.substring(1), 2);
+        } else {
+          value = parseInt(literal, 10);
+        }
+        if (value < 0 || value > 0xffff) {
+          message("**DEFINE value is outside 16-bit memory on line " + (i + 1) + ".**");
+          return false;
+        }
+
+        definitions[name] = value;
+      }
+
+      return true;
+    }
+
+    function replaceDefinedSymbols(param) {
+      return param.replace(/(^|[^A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)(?=$|[^A-Za-z0-9_])/g, function (match, prefix, name) {
+        var key = name.toUpperCase();
+        if (!Object.prototype.hasOwnProperty.call(definitions, key)) {
+          return match;
+        }
+
+        var hex = definitions[key].toString(16);
+        while (hex.length < 2) {
+          hex = "0" + hex;
+        }
+        return prefix + "$" + hex;
+      });
+    }
+
     // assembleLine()
     //
     // assembles one line of code.  Returns true if it assembled successfully,
     // false otherwise.
     function assembleLine(input, lineno) {
       var label, command, param, addr;
+      currentSourceLine = lineno;
 
       // remove comments
 
@@ -1910,6 +2054,10 @@ function SimulatorWidget(node) {
 
       command = command.toUpperCase();
 
+      if (command === "DEFINE") {
+        return true;
+      }
+
       if (input.match(/^\*\s*=\s*\$?[0-9a-f]*$/)) {
         // equ spotted
         param = input.replace(/^\s*\*\s*=\s*/, "");
@@ -1938,6 +2086,7 @@ function SimulatorWidget(node) {
       }
 
       param = param.replace(/[ ]/g, "");
+      param = replaceDefinedSymbols(param);
 
       if (command === "DCB") {
         return DCB(param);
@@ -2266,6 +2415,9 @@ function SimulatorWidget(node) {
 
     // pushByte() - Push byte to memory
     function pushByte(value) {
+      if (typeof currentSourceLine === "number") {
+        sourceLineByAddress[defaultCodePC] = currentSourceLine;
+      }
       memory.set(defaultCodePC, value & 0xff);
       defaultCodePC++;
       codeLen++;
@@ -2466,6 +2618,9 @@ function SimulatorWidget(node) {
       assembleCode: assembleCode,
       getCurrentPC: function () {
         return defaultCodePC;
+      },
+      getSourceLineForAddress: function (address) {
+        return sourceLineByAddress[address];
       },
       hexdump: hexdump,
       disassemble: disassemble

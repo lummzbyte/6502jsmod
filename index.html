@@ -16,7 +16,17 @@
         <input type="button" value="Notes" class="notesButton" />
       </div>
 
-      <textarea class="code"></textarea>
+      <div class="execution-controls">
+        <label for="executionSpeed">Execution speed:</label>
+        <input type="range" id="executionSpeed" class="execution-speed"
+          min="1" max="100" step="1" value="100" />
+        <span class="execution-speed-value">100%</span>
+      </div>
+
+      <div class="source-editor">
+        <div class="source-gutter" aria-hidden="true"></div>
+        <textarea class="code" aria-label="6502 assembly source" wrap="off"></textarea>
+      </div>
 
       <canvas class="screen" width="160" height="160"></canvas>
 
@@ -43,6 +53,11 @@
       <div class="messages"><pre><code></code></pre></div>
 
       <div class="notes" style="display: none">Notes:
+
+Use the DEFINE directive to declare a constant, for example:
+  define name $20
+Then use it as an operand with `LDA name` or `LDA #name`. Values can be
+hexadecimal (`$20`), decimal (`32`), or binary (`%00100000`).
 
 Memory location $fe contains a new random byte on every instruction.
 Memory location $ff contains the ascii code of the last key pressed.
